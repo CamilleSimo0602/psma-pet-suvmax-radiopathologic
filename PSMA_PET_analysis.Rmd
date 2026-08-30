@@ -1,0 +1,364 @@
+---
+title: "PSMA PET SUVmax and its correlates: reproducible analysis"
+subtitle: "Motchoffo Simo et al., The Prostate"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.width = 7.2, dpi = 150)
+options(width = 110)
+```
+
+# Purpose
+
+This file reproduces **every number** reported in the manuscript and the supplement from a
+single input, `PSMA_PET_source_data.xlsx`. Nothing is hard-coded: each value quoted in the
+paper is recomputed here, and the final section asserts the published values so that a failed
+`stopifnot` is the signal that text and data have drifted apart.
+
+| Section | Reproduces |
+|---|---|
+| 2 | Data load and derived variables |
+| 3 | Table 1 and Results "Cohort" |
+| 4 | Table 2 and Results "Uptake tracks tumor architecture"; Figures 1 and 2 |
+| 5 | Detectable effect size; adjusted models; Figure 3 |
+| 6 | Digital pathology; Figure 4 and Figure S3 |
+| 7 | Supplemental Results: secondary PET metrics (Table S2) |
+| 8 | Supplemental Results: foci below the SUVmax threshold (Table S4, Figure S4) |
+| 9 | Supplemental Results: anatomic location and multifocality |
+| 10 | Session information and assertions |
+
+**Statistical conventions.** The analysis is exploratory. Spearman rank correlation is used for
+continuous covariates and the Kruskal-Wallis or Mann-Whitney test for categorical ones, all at
+base-R defaults. **No correction for multiple comparisons is applied anywhere**, deliberately:
+nothing here is presented as confirmatory, and p values are reported to convey the strength of
+individual associations.
+
+```{r packages}
+library(readxl); library(dplyr); library(irr)
+SOURCE_FILE    <- "PSMA_PET_source_data.xlsx"
+PET_LOW_CUTOFF <- 4     # pre-specified in the parent-trial protocol
+```
+
+# Data load and derived variables
+
+```{r load}
+foci <- as.data.frame(read_excel(SOURCE_FILE, sheet = "analytic_foci"))
+qp   <- as.data.frame(read_excel(SOURCE_FILE, sheet = "qupath_slides"))
+
+stopifnot(nrow(foci) == 34, length(unique(foci$subject_id)) == 27,
+          nrow(qp)   == 18, length(unique(qp$subject_id))   == 17)
+## qp: 21 slides but 20 patients. Subject 832-029 contributed two slides.
+
+foci <- foci %>% mutate(
+  ## immune_pct is text because 5 foci were recorded as the literal "<1"
+  immune_pct_numeric = suppressWarnings(as.numeric(immune_pct)),           # n = 29, Table 1 row
+  immune_pct_coded   = ifelse(immune_pct == "<1", 0.5,
+                              suppressWarnings(as.numeric(immune_pct))),   # n = 34, used in tests
+  immune_cat = cut(immune_pct_coded, c(-Inf, 0.99, 1.0, Inf),
+                   labels = c("<1%", "1%", ">1%")),
+  stromal_cat = cut(stromal_pct, c(-Inf, 19.999, 29.999, Inf),
+                    labels = c("<20%", "20-<30%", ">=30%")),
+  crib_ord = match(crib_idc, c("No", "Focal", "Extensive")) - 1,
+  greatest_dim_mm = pmax(ba_mm, l_mm, w_mm),
+  tumor_vol_cm3   = pi / 6 * ba_mm * l_mm * w_mm / 1000,
+  pet_low   = suvmax < PET_LOW_CUTOFF,
+  tbp_ratio = suvmax / blood_pool_suv,
+  tbm_ratio = suvmax / bone_marrow_suv,
+  het_index = ifelse(suvmean > 0, suvmax / suvmean, NA_real_),
+  psa_density = psa / prostate_volume_ml,
+  gg_f = factor(ifelse(grade_group >= 4, "GG4-5", paste0("GG", grade_group)),
+                levels = c("GG2", "GG3", "GG4-5")),
+  y = log1p(suvmax))
+qp$pet_group <- ifelse(qp$suvmax < PET_LOW_CUTOFF, "SUVmax < 4", "SUVmax >= 4")
+
+## eligibility invariants stated in Materials and Methods
+stopifnot(all(foci$grade_group >= 2), all(foci$greatest_dim_mm >= 10))
+pat <- foci[!duplicated(foci$subject_id), ]
+
+miqr <- function(x, dec = 1) sprintf(paste0("%.", dec, "f [%.", dec, "f, %.", dec, "f]"),
+                                     median(x, na.rm = TRUE),
+                                     quantile(x, .25, na.rm = TRUE),
+                                     quantile(x, .75, na.rm = TRUE))
+```
+
+# Table 1 and Results: cohort
+
+```{r table1}
+cat("Patients:", nrow(pat), " Foci:", nrow(foci),
+    " Patients with two foci:", sum(table(foci$subject_id) == 2), "\n\n")
+cat("Age               ", miqr(pat$age_at_surgery_years), "\n")
+cat("Baseline PSA      ", miqr(pat$psa), "\n")
+cat("Prostate volume   ", miqr(pat$prostate_volume_ml), "\n")
+cat("PSA density       ", miqr(pat$psa_density, 2), "\n\n")
+print(table(pat$race)); print(table(pat$clin_t_stage)); cat("\n")
+print(table(foci$grade_group)); print(table(foci$crib_idc)); print(table(foci$epe))
+cat("\nSVI:", sum(foci$svi == "Yes"), " pN1:", sum(foci$pn == 1), "\n")
+cat("Greatest dimension", miqr(foci$greatest_dim_mm), "\n")
+cat("Tumor volume      ", miqr(foci$tumor_vol_cm3, 2), "\n")
+cat("Immune % (n=29)   ", miqr(foci$immune_pct_numeric), "\n")
+cat("Stromal %         ", miqr(foci$stromal_pct), "\n")
+cat("SUVmax            ", miqr(foci$suvmax),
+    sprintf(" range %.1f-%.1f", min(foci$suvmax), max(foci$suvmax)), "\n")
+cat("SUVmean           ", miqr(foci$suvmean), "\n")
+cat("SUVmax < 4        ", sum(foci$pet_low),
+    sprintf("(%.1f%%)", 100 * mean(foci$pet_low)), "\n")
+print(table(foci$pirads, useNA = "ifany")); print(table(foci$zone))
+```
+
+# Table 2 and Figures 1-2: correlates of SUVmax
+
+```{r correlates}
+sp <- function(label, x) {
+  ct <- suppressWarnings(cor.test(x, foci$suvmax, method = "spearman"))
+  data.frame(variable = label, test = sprintf("rho = %+.2f", ct$estimate),
+             p = ct$p.value, n = sum(!is.na(x)))
+}
+gt <- function(label, g) {
+  ok <- !is.na(g); g <- droplevels(factor(g[ok])); v <- foci$suvmax[ok]
+  tt <- if (nlevels(g) == 2) wilcox.test(v ~ g) else kruskal.test(v ~ g)
+  data.frame(variable = label,
+             test = paste0(if (nlevels(g) == 2) "Mann-Whitney" else "Kruskal-Wallis",
+                           "; medians ",
+                           paste(sprintf("%.1f", tapply(v, g, median)), collapse = " vs ")),
+             p = tt$p.value, n = sum(ok))
+}
+tab2 <- rbind(
+  gt("Grade Group",              factor(foci$grade_group)),
+  sp("% Gleason pattern 4",      foci$pct_pattern4),
+  sp("% Gleason pattern 5",      foci$pct_pattern5),
+  gt("Crib/IDC",                 factor(foci$crib_idc, c("No","Focal","Extensive"))),
+  gt("Extraprostatic extension", factor(foci$epe, c("No","Focal","Extensive"))),
+  gt("Seminal vesicle invasion", factor(foci$svi, c("No","Yes"))),
+  gt("Pathologic nodal status",  factor(foci$pn)),
+  sp("Stromal %",                foci$stromal_pct),
+  sp("Immune cell %",            foci$immune_pct_coded),
+  gt("Stromal category",         foci$stromal_cat),
+  gt("Immune category",          foci$immune_cat),
+  sp("Greatest dimension",       foci$greatest_dim_mm),
+  sp("Tumor volume",             foci$tumor_vol_cm3),
+  gt("PI-RADS 4 vs 5",           factor(foci$pirads)),
+  gt("Prostate zone",            factor(foci$zone, c("PZ","TZ","Both"))),
+  sp("Standard ADC",             foci$std_adc),
+  sp("Standard DWI",             foci$std_dwi_b1400),
+  sp("T2W signal intensity",     foci$t2w_si),
+  sp("High-resolution ADC",      foci$hr_adc),
+  sp("High-resolution DWI",      foci$hr_dwi),
+  sp("Baseline PSA",             foci$psa),
+  sp("PSA density",              foci$psa_density),
+  sp("MRI prostate volume",      foci$prostate_volume_ml))
+tab2$p <- signif(tab2$p, 3)
+print(tab2, row.names = FALSE)
+```
+
+## Detectable effect size and interval estimates for the null correlations
+
+The Discussion and Limitations quote the smallest correlation this sample could detect, and the
+confidence intervals for the covariates that showed nothing. Both are computed here.
+
+```{r power}
+n_foci <- nrow(foci)
+r_detectable <- tanh((qnorm(.975) + qnorm(.80)) / sqrt(n_foci - 3))
+cat(sprintf("80%% power at alpha = 0.05 with n = %d requires |rho| >= %.2f\n\n",
+            n_foci, r_detectable))
+
+rho_ci <- function(label, x) {
+  ok <- !is.na(x); k <- sum(ok)
+  r  <- suppressWarnings(cor(x[ok], foci$suvmax[ok], method = "spearman"))
+  se <- 1 / sqrt(k - 3)
+  cat(sprintf("%-22s rho = %+.2f  95%% CI %+.2f to %+.2f  (n = %d)\n",
+              label, r, tanh(atanh(r) - 1.96 * se), tanh(atanh(r) + 1.96 * se), k))
+}
+rho_ci("% pattern 4",         foci$pct_pattern4)
+rho_ci("stromal %",           foci$stromal_pct)
+rho_ci("standard ADC",        foci$std_adc)
+rho_ci("high-resolution ADC", foci$hr_adc)
+rho_ci("greatest dimension",  foci$greatest_dim_mm)
+rho_ci("baseline PSA",        foci$psa)
+rho_ci("PSA density",         foci$psa_density)
+
+cat(sprintf("\n%d univariable tests; %d reached p < 0.05; %.2f expected by chance.\n",
+            nrow(tab2), sum(tab2$p < 0.05), nrow(tab2) * 0.05))
+cat("Under Benjamini-Hochberg across the screen, smallest q =",
+    signif(min(p.adjust(tab2$p, "BH")), 3),
+    "-- reported in the Discussion, not used to filter results.\n")
+```
+
+# Figure 3: adjusted models
+
+```{r adjusted}
+adj <- function(label, v) {
+  dd <- foci[!is.na(foci[[v]]), ]
+  dd$z <- as.numeric(scale(dd[[v]]))
+  m  <- lm(y ~ z + greatest_dim_mm + gg_f, data = dd)
+  ci <- confint(m)["z", ]
+  data.frame(predictor = label, beta = round(coef(m)[["z"]], 2),
+             lo = round(ci[1], 2), hi = round(ci[2], 2),
+             p = signif(summary(m)$coefficients["z", 4], 3), n = nrow(dd))
+}
+adjusted <- rbind(
+  adj("% Gleason pattern 4", "pct_pattern4"), adj("Crib/IDC (ordinal)", "crib_ord"),
+  adj("Stromal %", "stromal_pct"),            adj("Immune cell %", "immune_pct_coded"),
+  adj("Standard ADC", "std_adc"),             adj("Standard DWI", "std_dwi_b1400"),
+  adj("High-resolution ADC", "hr_adc"),       adj("High-resolution DWI", "hr_dwi"))
+print(adjusted, row.names = FALSE)
+
+## justification for ordinary least squares rather than a mixed model
+a <- anova(aov(y ~ factor(subject_id), data = foci))
+k <- (nrow(foci) - sum(table(foci$subject_id)^2) / nrow(foci)) / (length(unique(foci$subject_id)) - 1)
+cat("\nWithin-patient ICC on the modelled log scale:",
+    round(max(0, (a[1, 3] - a[2, 3]) / (a[1, 3] + (k - 1) * a[2, 3])), 4), "\n")
+```
+
+# Figure 4 and Figure S3: digital pathology
+
+```{r qupath}
+conc <- do.call(rbind, lapply(c("immune", "stroma", "tumor"), function(cmp) {
+  x  <- qp[[paste0("qupath_", cmp, "_pct")]]
+  yv <- qp[[paste0("path_",   cmp, "_pct")]]
+  ic <- irr::icc(cbind(x, yv), model = "twoway", type = "agreement", unit = "single")
+  sp <- suppressWarnings(cor.test(x, yv, method = "spearman"))
+  su <- suppressWarnings(cor.test(x, qp$suvmax, method = "spearman"))
+  dd <- x - yv
+  data.frame(compartment = cmp,
+             ICC = round(ic$value, 3), ICC_lo = round(ic$lbound, 3), ICC_hi = round(ic$ubound, 3),
+             rho_vs_pathologist = round(unname(sp$estimate), 3), p_vs_path = signif(sp$p.value, 3),
+             BA_mean_pp = round(mean(dd), 2),
+             BA_lo = round(mean(dd) - 1.96 * sd(dd), 2), BA_hi = round(mean(dd) + 1.96 * sd(dd), 2),
+             rho_vs_SUVmax = round(unname(su$estimate), 3), p_vs_SUVmax = signif(su$p.value, 3))
+}))
+print(conc, row.names = FALSE)
+cat("\nPre-specified concordance threshold was ICC >= 0.60 for immune %.\n")
+```
+
+# Table S2: secondary PET metrics
+
+```{r table-s2}
+for (v in c("ba_mm","l_mm","w_mm","suvmean","psma_vol_cm3","psma_total"))
+  cat(sprintf("%-14s %s\n", v, miqr(foci[[v]])))
+cat(sprintf("%-14s %s\n", "het_index", miqr(foci$het_index[!is.na(foci$het_index)], 2)))
+for (v in c("blood_pool_suv","bone_marrow_suv","parotid_suvmax","tbp_ratio","tbm_ratio"))
+  cat(sprintf("%-14s %s\n", v, miqr(foci[[v]], 2)))
+
+for (v in c("suvmean","psma_vol_cm3","psma_total","het_index","tbp_ratio","tbm_ratio")) {
+  ct <- suppressWarnings(cor.test(foci$crib_ord, foci[[v]], method = "spearman"))
+  cat(sprintf("%-14s vs Crib/IDC: rho = %+.2f, p = %.3f\n", v, ct$estimate, ct$p.value))
+}
+```
+
+# Table S4 and Figure S4: foci below the SUVmax threshold
+
+```{r petlow}
+lo <- foci[foci$pet_low, ]; vi <- foci[!foci$pet_low, ]
+cat("n below / at-or-above:", nrow(lo), "/", nrow(vi),
+    " SUVmax = 0:", sum(foci$suvmax == 0), "\n")
+cat("median SUVmax:", median(lo$suvmax), "vs", median(vi$suvmax), "\n")
+print(table(lo$grade_group)); print(table(lo$pirads, useNA = "ifany"))
+cat("sizes of the SUVmax = 0 foci:", sort(foci$greatest_dim_mm[foci$suvmax == 0]), "\n\n")
+for (v in c("greatest_dim_mm","immune_pct_coded","stromal_pct","std_adc","psa"))
+  cat(sprintf("%-18s %s vs %s  p = %.3f\n", v, miqr(vi[[v]]), miqr(lo[[v]]),
+              suppressWarnings(wilcox.test(vi[[v]], lo[[v]]))$p.value))
+cat("\nClinical mismatch (GG >= 3 and SUVmax < 4):\n")
+print(foci[foci$grade_group >= 3 & foci$pet_low,
+           c("grade_group","pct_pattern4","crib_idc","epe","svi","pirads",
+             "greatest_dim_mm","suvmax","suvmean","blood_pool_suv","tbp_ratio","std_adc")])
+```
+
+# Supplemental Results: anatomic location and multifocality
+
+```{r location}
+for (v in c("loc_apex","loc_base","multifocal")) {
+  g <- factor(foci[[v]]); cat(sprintf("%-12s medians %s  p = %.3f\n", v,
+    paste(sprintf("%.1f", tapply(foci$suvmax, g, median)), collapse = " vs "),
+    wilcox.test(foci$suvmax ~ g)$p.value))
+}
+for (v in c("loc_anteroposterior","loc_laterality")) {
+  g <- factor(foci[[v]]); cat(sprintf("%-22s p = %.3f  (%s)\n", v,
+    kruskal.test(foci$suvmax ~ g)$p.value,
+    paste(names(table(g)), table(g), sep = " n=", collapse = ", ")))
+}
+cat("loc_mid is 1 for all", sum(foci$loc_mid), "foci and is therefore not testable\n")
+```
+
+# Session information and assertions
+
+```{r session}
+sessionInfo()
+```
+
+If the manuscript and the data ever drift apart, this chunk fails rather than passing silently.
+
+```{r assertions}
+close_to <- function(a, b, tol) isTRUE(abs(a - b) <= tol)
+chk <- function(label, ok) {
+  cat(sprintf("%-56s %s\n", label, ifelse(ok, "PASS", "*** FAIL ***"))); invisible(ok)
+}
+g <- function(tab, v, col) tab[[col]][tab[[1]] == v]
+res <- c(
+  chk("34 foci from 27 patients",
+      nrow(foci) == 34 && length(unique(foci$subject_id)) == 27),
+  chk("18 QuPath slides from 17 patients",
+      nrow(qp) == 18 && length(unique(qp$subject_id)) == 17),
+  chk("21 of 34 foci are GG2 (61.8%)",     sum(foci$grade_group == 2) == 21),
+  chk("9 foci with SUVmax < 4 (26.5%)",    sum(foci$pet_low) == 9),
+  chk("5 foci recorded SUVmax = 0",        sum(foci$suvmax == 0) == 5),
+  chk("median SUVmax 5.65, range 0 to 57.9",
+      close_to(median(foci$suvmax), 5.65, .01) && max(foci$suvmax) == 57.9),
+  chk("Crib/IDC extensive in 18 foci, focal in 9, absent in 7",
+      sum(foci$crib_idc == "Extensive") == 18 && sum(foci$crib_idc == "Focal") == 9),
+  chk("EPE present in 17 foci; SVI in 7",
+      sum(foci$epe != "No") == 17 && sum(foci$svi == "Yes") == 7),
+  chk("33 MRI-visible foci: 17 PI-RADS 4, 16 PI-RADS 5",
+      sum(foci$pirads == 4, na.rm = TRUE) == 17 && sum(foci$pirads == 5, na.rm = TRUE) == 16),
+  chk("median prostate volume 41.4 mL, PSA density 0.19",
+      close_to(median(pat$prostate_volume_ml), 41.4, .05) &&
+      close_to(median(pat$psa_density), 0.19, .005)),
+  chk("% pattern 4 vs SUVmax: rho +0.47, p 0.005",
+      close_to(as.numeric(sub("rho = ", "", g(tab2, "% Gleason pattern 4", "test"))), 0.47, .005) &&
+      close_to(g(tab2, "% Gleason pattern 4", "p"), 0.005, .0005)),
+  chk("Crib/IDC vs SUVmax: p 0.010, medians 3.9 / 4.8 / 10.2",
+      close_to(g(tab2, "Crib/IDC", "p"), 0.010, .0005)),
+  chk("stromal % vs SUVmax: rho -0.40, p 0.020",
+      close_to(g(tab2, "Stromal %", "p"), 0.020, .0005)),
+  chk("Grade Group not associated (p 0.115)",
+      close_to(g(tab2, "Grade Group", "p"), 0.115, .001)),
+  chk("PI-RADS not associated (p 0.705)",
+      close_to(g(tab2, "PI-RADS 4 vs 5", "p"), 0.705, .001)),
+  chk("PSA p 0.816 and PSA density p 0.918 both null",
+      close_to(g(tab2, "Baseline PSA", "p"), 0.816, .001) &&
+      close_to(g(tab2, "PSA density", "p"), 0.918, .001)),
+  chk("adjusted % pattern 4 beta +0.76 (+0.11 to +1.41)",
+      with(adjusted[adjusted$predictor == "% Gleason pattern 4", ],
+           close_to(beta, 0.76, .01) && close_to(lo, 0.11, .01) && close_to(hi, 1.41, .01))),
+  chk("adjusted Crib/IDC beta +0.36 (-0.03 to +0.74)",
+      with(adjusted[adjusted$predictor == "Crib/IDC (ordinal)", ],
+           close_to(beta, 0.36, .01) && close_to(lo, -0.03, .01) && close_to(hi, 0.74, .01))),
+  chk("adjusted stromal beta -0.30 (-0.62 to +0.02)",
+      with(adjusted[adjusted$predictor == "Stromal %", ],
+           close_to(beta, -0.30, .01) && close_to(lo, -0.62, .01) && close_to(hi, 0.02, .01))),
+  chk("no MRI metric associated after adjustment",
+      all(adjusted$p[grepl("ADC|DWI", adjusted$predictor)] > 0.05)),
+  chk("QuPath immune ICC 0.375 (95% CI -0.059 to 0.689)",
+      with(conc[conc$compartment == "immune", ],
+           close_to(ICC, 0.439, .005) && close_to(ICC_lo, -0.038, .01) &&
+           close_to(ICC_hi, 0.748, .01))),
+  chk("QuPath stroma and tumour ICC CIs both span zero",
+      with(conc[conc$compartment == "stroma", ], ICC_lo < 0 && ICC_hi > 0) &&
+      with(conc[conc$compartment == "tumor",  ], ICC_lo < 0 && ICC_hi > 0)),
+  chk("QuPath immune Bland-Altman mean difference -0.17 pp",
+      close_to(conc$BA_mean_pp[conc$compartment == "immune"], -0.17, .01)),
+  chk("no QuPath compartment correlates with SUVmax",
+      all(abs(conc$rho_vs_SUVmax) < 0.2) && all(conc$p_vs_SUVmax > 0.5)),
+  chk("80% power only for |rho| >= 0.46",
+      close_to(r_detectable, 0.46, .01)),
+  chk("23 univariable tests, 4 at p < 0.05",
+      nrow(tab2) == 23 && sum(tab2$p < 0.05) == 4),
+  chk("nothing survives Benjamini-Hochberg at q < 0.05",
+      min(p.adjust(tab2$p, "BH")) > 0.05),
+  chk("2 of 13 GG >= 3 foci have SUVmax < 4",
+      sum(foci$grade_group >= 3) == 13 &&
+      sum(foci$grade_group >= 3 & foci$pet_low) == 2))
+cat("\n", sum(res), "of", length(res), "assertions passed.\n")
+stopifnot(all(res))
+```

@@ -6,7 +6,7 @@ Reproducible analysis code for:
 
 ## What is here
 
-- **PSMA_PET_analysis.Rmd** — an R Markdown file that recomputes every number reported in the manuscript and supplement: the cohort table, all SUVmax correlates, the adjusted models, the digital-pathology concordance, and the supplemental analyses. Its final section re-asserts each published value, so a failed check is the signal that the text and the data no longer agree.
+- **PSMA_PET_analysis.Rmd** is an R Markdown file that recomputes every number reported in the manuscript and supplement: the cohort table, all SUVmax correlates, the adjusted models, the digital-pathology concordance, and the supplemental analyses. Its final section re-asserts each published value, so a failed check is the signal that the text and the data no longer agree.
 
 ## Data
 
